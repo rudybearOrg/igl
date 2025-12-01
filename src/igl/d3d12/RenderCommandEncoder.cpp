@@ -573,8 +573,15 @@ void RenderCommandEncoder::endEncoding() {
 
           IGL_D3D12_LOG_VERBOSE("RenderCommandEncoder::endEncoding - MSAA color resolve completed for attachment %zu\n", i);
 
-          // Transition resolve texture to PIXEL_SHADER_RESOURCE for subsequent use
-          resolveAttachment->transitionAll(commandList_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+          // Transition resolve target: if this command buffer will Present and the resolve target
+          // is the current back buffer, put it into PRESENT/COMMON. Otherwise keep it as SRV.
+          const bool isBackBuffer =
+              resolveAttachment->getResource() == context2.getCurrentBackBuffer();
+          if (commandBuffer_.willPresent() && isBackBuffer) {
+            resolveAttachment->transitionAll(commandList_, D3D12_RESOURCE_STATE_PRESENT);
+          } else {
+            resolveAttachment->transitionAll(commandList_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+          }
         }
       }
     }
@@ -608,8 +615,13 @@ void RenderCommandEncoder::endEncoding() {
 
         IGL_D3D12_LOG_VERBOSE("RenderCommandEncoder::endEncoding - MSAA depth resolve completed\n");
 
-        // Transition resolved depth to shader resource for sampling
-        resolveDepth->transitionAll(commandList_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        const bool isBackBuffer =
+            resolveDepth->getResource() == context2.getCurrentBackBuffer();
+        if (commandBuffer_.willPresent() && isBackBuffer) {
+          resolveDepth->transitionAll(commandList_, D3D12_RESOURCE_STATE_PRESENT);
+        } else {
+          resolveDepth->transitionAll(commandList_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        }
       }
     }
   }
@@ -649,6 +661,54 @@ void RenderCommandEncoder::endEncoding() {
       barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
       barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
       commandList_->ResourceBarrier(1, &barrier);
+    }
+  }
+
+  // Final safety: ensure the current back buffer is in PRESENT/COMMON when this command buffer
+  // requested a Present, even if other transitions left it in an SRV state.
+  if (commandBuffer_.willPresent()) {
+    auto* backBuffer = context2.getCurrentBackBuffer();
+    if (backBuffer) {
+      bool transitioned = false;
+      if (framebuffer_) {
+        const auto indices = framebuffer_->getColorAttachmentIndices();
+        for (size_t i : indices) {
+          auto tex = std::static_pointer_cast<Texture>(framebuffer_->getColorAttachment(i));
+          if (tex && tex->getResource() == backBuffer) {
+            tex->transitionAll(commandList_, D3D12_RESOURCE_STATE_PRESENT);
+            transitioned = true;
+          }
+          auto resolveTex =
+              std::static_pointer_cast<Texture>(framebuffer_->getResolveColorAttachment(i));
+          if (resolveTex && resolveTex->getResource() == backBuffer) {
+            resolveTex->transitionAll(commandList_, D3D12_RESOURCE_STATE_PRESENT);
+            transitioned = true;
+          }
+        }
+      }
+      if (!transitioned) {
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        barrier.Transition.pResource = backBuffer;
+        // Force PSR -> PRESENT; if the actual state differs, D3D12 will still insert a barrier.
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        commandList_->ResourceBarrier(1, &barrier);
+      }
+
+      // Absolute safety: always emit a final barrier to PRESENT for the backbuffer, independent of
+      // tracked state. This covers cases where the swapchain image was left in a sampled state by
+      // DXGI internal command lists or untracked transitions.
+      D3D12_RESOURCE_BARRIER forcePresent = {};
+      forcePresent.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      forcePresent.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+      forcePresent.Transition.pResource = backBuffer;
+      forcePresent.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+      forcePresent.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+      forcePresent.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      commandList_->ResourceBarrier(1, &forcePresent);
     }
   }
 

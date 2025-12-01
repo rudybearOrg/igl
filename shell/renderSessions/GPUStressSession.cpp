@@ -145,6 +145,41 @@ std::string GPUStressSession::getLightingCalc() const {
   return params;
 }
 
+std::string GPUStressSession::getLightingCalcHlsl() const {
+  std::string params = "\nfloat3 lighting = input.color.xyz;\n";
+  if (lightCount_) {
+    params = "\nfloat3 lighting = float3(0.2, 0.2, 0.2);\n";
+  }
+  for (int i = 0; i < lightCount_; ++i) {
+    char tmp[256];
+    snprintf(tmp,
+             sizeof(tmp),
+             "const float3 lightColor%d = float3(%f, %f, %f);\n",
+             i,
+             i % 3 == 0 ? 1.0f : static_cast<float>(customArc4random() % 32) / 32.f,
+             i % 3 == 1 ? 1.0f : static_cast<float>(customArc4random() % 32) / 32.f,
+             i % 3 == 2 ? 1.0f : static_cast<float>(customArc4random() % 32) / 32.f);
+    params += tmp;
+    snprintf(tmp,
+             sizeof(tmp),
+             "const float3 lightPos%d = float3(%f, %f, %f);\n",
+             i,
+             -1.f + static_cast<float>(customArc4random() % 32) / 16.f,
+             -1.f + static_cast<float>(customArc4random() % 32) / 16.f,
+             -1.f + static_cast<float>(customArc4random() % 32) / 16.f);
+    params += tmp;
+    snprintf(tmp,
+             sizeof(tmp),
+             "lighting += calcLighting(-lightPos%d, lightPos%d, input.color.xyz, 1.0, lightColor%d, input.screen_pos);\n",
+             i,
+             i,
+             i);
+    params += tmp;
+  }
+  params += "float4 lightFactor = float4(lighting, 1.0);\n";
+  return params;
+}
+
 namespace {
 std::string getVulkanVertexShaderSource(bool multiView) {
   return std::string(multiView ? "\n#define MULTIVIEW 1\n" : "") + R"(
@@ -208,8 +243,8 @@ std::unique_ptr<IShaderStages> GPUStressSession::getShaderStagesForBackend(
   const bool multiView = device.hasFeature(DeviceFeatures::Multiview);
   switch (device.getBackendType()) {
   // @fb-only
-    // @fb-only
-    // @fb-only
+  // @fb-only
+  // @fb-only
   case igl::BackendType::Vulkan:
     return igl::ShaderStagesCreator::fromModuleStringInput(
         device,
@@ -220,6 +255,80 @@ std::unique_ptr<IShaderStages> GPUStressSession::getShaderStagesForBackend(
         "main",
         "",
         nullptr);
+  case igl::BackendType::D3D12: {
+    // HLSL shaders that mirror the Vulkan GLSL variant with lighting.
+    const std::string vertexShaderHlsl = R"(
+      cbuffer PushConstants : register(b1) {
+        float4x4 projectionMatrix;
+        float4x4 modelViewMatrix;
+        float scaleZ;
+      };
+
+      struct VSInput {
+        float3 position   : POSITION;
+        float4 uvw        : TEXCOORD0;
+        float4 base_color : COLOR0;
+      };
+
+      struct VSOutput {
+        float4 position   : SV_POSITION;
+        float4 uv         : TEXCOORD0;
+        float4 color      : COLOR0;
+        float3 screen_pos : TEXCOORD1;
+      };
+
+      VSOutput main(VSInput input) {
+        VSOutput output;
+        float4 worldPos = mul(modelViewMatrix, float4(input.position, 1.0));
+        output.position = mul(projectionMatrix, worldPos);
+        output.uv = input.uvw;
+        output.color = input.base_color;
+        output.screen_pos = output.position.xyz / output.position.w;
+        return output;
+      }
+    )";
+
+    const std::string fragmentShaderHlsl = std::string(R"(
+      cbuffer PushConstants : register(b1) {
+        float4x4 projectionMatrix;
+        float4x4 modelViewMatrix;
+        float scaleZ;
+      };
+
+      Texture2D uTex  : register(t0);
+      SamplerState s0 : register(s0);
+      Texture2D uTex2 : register(t1);
+      SamplerState s1 : register(s1);
+
+      struct PSInput {
+        float4 position   : SV_POSITION;
+        float4 uv         : TEXCOORD0;
+        float4 color      : COLOR0;
+        float3 screen_pos : TEXCOORD1;
+      };
+
+      float3 calcLighting(float3 lightDir, float3 lightPosition, float3 normal, float attenuation, float3 color, float3 screenPos) {
+        float3 transformedNormal = normalize(mul((float3x3)(projectionMatrix * modelViewMatrix), normal));
+        float angle = dot(normalize(lightDir), transformedNormal);
+        float distance = length(lightPosition - screenPos);
+        float intensity = saturate(smoothstep(attenuation, 0.0, distance));
+        return intensity * color * angle;
+      }
+
+      float4 main(PSInput input) : SV_Target {
+        float4 color = input.color;
+    )") +
+                                          getLightingCalcHlsl() +
+                                          R"(
+        float4 tex0 = uTex.Sample(s0, input.uv.zw);
+        float4 tex1 = uTex2.Sample(s1, input.uv.xy);
+        return float4(lightFactor.xyz, 1.0) * tex0 * tex1;
+      }
+    )";
+
+    return igl::ShaderStagesCreator::fromModuleStringInput(
+        device, vertexShaderHlsl.c_str(), "main", "", fragmentShaderHlsl.c_str(), "main", "", nullptr);
+  }
   default:
     IGL_DEBUG_ASSERT_NOT_REACHED();
     return nullptr;
@@ -274,7 +383,7 @@ bool isDeviceCompatible(IDevice& device) noexcept {
     }
   }
 
-  if (backendtype == BackendType::Vulkan) {
+  if (backendtype == BackendType::Vulkan || backendtype == BackendType::D3D12) {
     return true;
   }
   return false;
@@ -764,13 +873,29 @@ void GPUStressSession::initState(const igl::SurfaceTextures& surfaceTextures) {
   if (pipelineState_ == nullptr) {
     // Graphics pipeline: state batch that fully configures GPU for rendering
 
+    // Match pipeline sample count to the actual color attachment (fallback to swapchain).
+    uint32_t samples = 1;
+    if (framebuffer_ && framebuffer_->getColorAttachment(0)) {
+      samples = framebuffer_->getColorAttachment(0)->getSamples();
+    } else if (surfaceTextures.color) {
+      samples = surfaceTextures.color->getSamples();
+    }
+    samples = std::max(1u, samples);
+    if (samples != lastSampleCount_) {
+      IGL_LOG_INFO("GPUStressSession: Rebuilding pipeline for sampleCount=%u (previous=%u)\n",
+                   samples,
+                   lastSampleCount_);
+      pipelineState_ = nullptr; // force rebuild with correct sample count
+      lastSampleCount_ = samples;
+    }
+
     RenderPipelineDesc graphicsDesc;
     graphicsDesc.vertexInputState = vertexInput0_;
     graphicsDesc.shaderStages = shaderStages_;
     graphicsDesc.targetDesc.colorAttachments.resize(1);
     graphicsDesc.targetDesc.colorAttachments[0].textureFormat =
         framebuffer_->getColorAttachment(0)->getProperties().format;
-    graphicsDesc.sampleCount = useMSAA_ ? kMsaaSamples : 1;
+    graphicsDesc.sampleCount = samples;
     graphicsDesc.targetDesc.depthAttachmentFormat =
         framebuffer_->getDepthAttachment()->getProperties().format;
     graphicsDesc.fragmentUnitSamplerMap[textureUnit] = IGL_NAMEHANDLE("inputImage");

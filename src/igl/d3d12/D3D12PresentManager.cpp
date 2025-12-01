@@ -19,6 +19,46 @@ bool PresentManager::present() {
   }
 
   auto* device = context_.getDevice();
+  auto* commandQueue = context_.getCommandQueue();
+  ID3D12Resource* backBuffer = context_.getCurrentBackBuffer();
+
+  // Ensure backbuffer is in PRESENT/COMMON state even if previous passes left it in SRV.
+  // This uses a tiny one-off command list before Present.
+  if (device && commandQueue && backBuffer) {
+    igl::d3d12::ComPtr<ID3D12CommandAllocator> alloc;
+    igl::d3d12::ComPtr<ID3D12GraphicsCommandList> cl;
+    if (SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                 IID_PPV_ARGS(alloc.GetAddressOf()))) &&
+        SUCCEEDED(device->CreateCommandList(0,
+                                            D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                            alloc.Get(),
+                                            nullptr,
+                                            IID_PPV_ARGS(cl.GetAddressOf())))) {
+      D3D12_RESOURCE_BARRIER barrier{};
+      barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+      barrier.Transition.pResource = backBuffer;
+      barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+      barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+      barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      cl->ResourceBarrier(1, &barrier);
+      cl->Close();
+
+      ID3D12CommandList* lists[] = {cl.Get()};
+      commandQueue->ExecuteCommandLists(1, lists);
+
+      igl::d3d12::ComPtr<ID3D12Fence> fence;
+      if (SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf())))) {
+        HANDLE evt = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (evt) {
+          commandQueue->Signal(fence.Get(), 1);
+          fence->SetEventOnCompletion(1, evt);
+          WaitForSingleObject(evt, INFINITE);
+          CloseHandle(evt);
+        }
+      }
+    }
+  }
 
   // Check device status before presenting
   if (!checkDeviceStatus("before Present")) {

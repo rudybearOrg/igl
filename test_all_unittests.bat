@@ -9,6 +9,7 @@ set FAIL_COUNT=0
 set TOTAL_FAILED_TESTS=0
 set TESTS_EXECUTED=0
 set FAILURES=
+set VS_GENERATOR=Visual Studio 18 2026
 
 call :run_d3d12
 
@@ -42,7 +43,7 @@ if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 
 echo.
 echo --- [%NAME%] Configure ---
-cmake -S . -B build/vs -G "Visual Studio 17 2022" -A x64 -DIGL_WITH_D3D12=ON -DIGL_WITH_OPENGL=OFF -DIGL_WITH_VULKAN=OFF -DIGL_WITH_TESTS=ON >> "%LOG_DIR%\configure.log" 2>&1
+cmake -S . -B build/vs -G "%VS_GENERATOR%" -A x64 -DIGL_WITH_D3D12=ON -DIGL_WITH_OPENGL=OFF -DIGL_WITH_VULKAN=OFF -DIGL_WITH_TESTS=ON >> "%LOG_DIR%\configure.log" 2>&1
 set CMD_ERROR=!ERRORLEVEL!
 if not "!CMD_ERROR!"=="0" (
   echo [%NAME%] CRITICAL: Configure failed ^(exit !CMD_ERROR!^), see %LOG_DIR%\configure.log

@@ -76,6 +76,7 @@ class GPUStressSession : public RenderSession {
   };
 
   [[nodiscard]] std::string getLightingCalc() const;
+  [[nodiscard]] std::string getLightingCalcHlsl() const;
   [[nodiscard]] std::string getVulkanFragmentShaderSource() const;
   std::unique_ptr<IShaderStages> getShaderStagesForBackend(IDevice& device) const noexcept;
   void addNormalsToCube();
@@ -93,6 +94,7 @@ class GPUStressSession : public RenderSession {
   std::shared_ptr<IFramebuffer> framebuffer_;
   std::unique_ptr<iglu::imgui::Session> imguiSession_;
   std::shared_ptr<IDepthStencilState> depthStencilState_;
+  uint32_t lastSampleCount_ = 0;
 
   VertexFormat vertexParameters_;
 

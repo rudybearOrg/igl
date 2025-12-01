@@ -376,7 +376,9 @@ void Session::Renderer::newFrame(const igl::FramebufferDesc& desc) {
   renderPipelineDesc_.targetDesc.stencilAttachmentFormat =
       desc.stencilAttachment.texture ? desc.stencilAttachment.texture->getFormat()
                                      : igl::TextureFormat::Invalid;
-  renderPipelineDesc_.sampleCount = desc.colorAttachments[0].texture->getSamples();
+  const uint32_t samples = desc.colorAttachments[0].texture->getSamples();
+  renderPipelineDesc_.sampleCount = samples;
+  IGL_LOG_INFO("ImGui::Session newFrame sampleCount=%u\n", samples);
 }
 
 void Session::Renderer::renderDrawData(igl::IDevice& device,

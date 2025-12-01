@@ -1838,8 +1838,8 @@ std::shared_ptr<IRenderPipelineState> Device::createRenderPipeline(
 
   // Sample settings
   psoDesc.SampleMask = UINT_MAX;
-  psoDesc.SampleDesc.Count = 1;
-  psoDesc.SampleDesc.Quality = 0;  // Must be 0 for Count=1
+  psoDesc.SampleDesc.Count = std::max(1u, desc.sampleCount);
+  psoDesc.SampleDesc.Quality = 0;  // Standard quality level; higher values are vendor-specific
 
   // Primitive topology - convert from IGL topology enum
   if (desc.topology == igl::PrimitiveType::Point) {
